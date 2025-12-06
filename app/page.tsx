@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 
-const CHAINS = [
+const EVM_CHAINS = [
   'ETH',
   'BSC',
   'Polygon',
@@ -15,18 +15,25 @@ const CHAINS = [
   'Linea',
   'Scroll',
   'Mantle',
-  'Solana',
 ];
+
+const CHAINS = ['All EVM Chains', ...EVM_CHAINS, 'Solana'];
 
 interface BalanceResult {
   address: string;
-  balance: string;
+  balances: Record<string, string>;
+}
+
+interface ApiResponse {
+  results: BalanceResult[];
+  chains: string[];
 }
 
 export default function Home() {
-  const [selectedChain, setSelectedChain] = useState<string>('ETH');
+  const [selectedChain, setSelectedChain] = useState<string>('All EVM Chains');
   const [addresses, setAddresses] = useState<string>('');
   const [results, setResults] = useState<BalanceResult[]>([]);
+  const [queriedChains, setQueriedChains] = useState<string[]>([]);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
 
@@ -67,8 +74,9 @@ export default function Home() {
         throw new Error(errorData.error || '查询失败');
       }
 
-      const data: BalanceResult[] = await response.json();
-      setResults(data);
+      const data: ApiResponse = await response.json();
+      setResults(data.results);
+      setQueriedChains(data.chains);
     } catch (err) {
       setError(err instanceof Error ? err.message : '查询失败，请稍后重试');
     } finally {
@@ -76,11 +84,11 @@ export default function Home() {
     }
   };
 
-  const getBalanceUnit = () => {
-    if (selectedChain === 'Solana') {
+  const getBalanceUnit = (chain: string) => {
+    if (chain === 'Solana') {
       return 'SOL';
     }
-    return selectedChain === 'ETH' ? 'ETH' : selectedChain;
+    return chain === 'ETH' ? 'ETH' : chain;
   };
 
   return (
@@ -134,21 +142,32 @@ export default function Home() {
             <table>
               <thead>
                 <tr>
-                  <th>地址</th>
-                  <th>余额 ({getBalanceUnit()})</th>
+                  <th className="address-header">地址</th>
+                  {queriedChains.map((chain) => (
+                    <th key={chain} className="chain-header">
+                      {chain} ({getBalanceUnit(chain)})
+                    </th>
+                  ))}
                 </tr>
               </thead>
               <tbody>
                 {results.map((result, index) => (
                   <tr key={index}>
                     <td className="address-cell">{result.address}</td>
-                    <td className="balance-cell">
-                      {result.balance === 'Error'
-                        ? '查询失败'
-                        : parseFloat(result.balance).toLocaleString('en-US', {
-                            maximumFractionDigits: 8,
-                          })}
-                    </td>
+                    {queriedChains.map((chain) => {
+                      const balance = result.balances[chain] || 'N/A';
+                      return (
+                        <td key={chain} className="balance-cell">
+                          {balance === 'Error'
+                            ? '查询失败'
+                            : balance === 'N/A'
+                            ? '-'
+                            : parseFloat(balance).toLocaleString('en-US', {
+                                maximumFractionDigits: 8,
+                              })}
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
               </tbody>
@@ -277,15 +296,37 @@ export default function Home() {
           color: #555;
         }
 
+        .address-header {
+          position: sticky;
+          left: 0;
+          background: #f5f5f5;
+          z-index: 1;
+        }
+
+        .chain-header {
+          white-space: nowrap;
+          min-width: 120px;
+        }
+
         .address-cell {
           font-family: 'Courier New', monospace;
           font-size: 0.9rem;
           word-break: break-all;
+          position: sticky;
+          left: 0;
+          background: white;
+          z-index: 1;
+        }
+
+        tbody tr:hover .address-cell {
+          background: #f9f9f9;
         }
 
         .balance-cell {
           font-weight: 600;
           color: #0070f3;
+          text-align: right;
+          white-space: nowrap;
         }
 
         tbody tr:hover {

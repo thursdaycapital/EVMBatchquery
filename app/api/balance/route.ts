@@ -23,12 +23,13 @@ const SOLANA_RPC = 'https://api.mainnet-beta.solana.com';
 
 interface BalanceRequest {
   chain: string;
+  chains?: string[]; // 支持多链查询
   addresses: string[];
 }
 
 interface BalanceResponse {
   address: string;
-  balance: string;
+  balances: Record<string, string>; // 每个链的余额
 }
 
 // 查询 EVM 链余额
@@ -66,45 +67,58 @@ async function getSolanaBalance(address: string): Promise<string> {
 export async function POST(request: NextRequest) {
   try {
     const body: BalanceRequest = await request.json();
-    const { chain, addresses } = body;
+    const { chain, chains, addresses } = body;
 
-    if (!chain || !addresses || !Array.isArray(addresses) || addresses.length === 0) {
+    if (!addresses || !Array.isArray(addresses) || addresses.length === 0) {
       return NextResponse.json(
-        { error: 'Invalid request. Chain and addresses array are required.' },
+        { error: 'Invalid request. Addresses array is required.' },
         { status: 400 }
       );
     }
 
-    const results: BalanceResponse[] = [];
-
-    // 批量查询余额
-    if (chain === 'Solana') {
-      // Solana 查询
-      const promises = addresses.map(async (address) => {
-        try {
-          const balance = await getSolanaBalance(address);
-          return { address, balance };
-        } catch (error) {
-          return { address, balance: 'Error' };
-        }
-      });
-      const solanaResults = await Promise.all(promises);
-      results.push(...solanaResults);
+    // 确定要查询的链列表
+    let chainsToQuery: string[] = [];
+    if (chains && chains.length > 0) {
+      chainsToQuery = chains;
+    } else if (chain === 'All EVM Chains') {
+      // 查询所有 EVM 链
+      chainsToQuery = Object.keys(EVM_RPC_ENDPOINTS);
+    } else if (chain === 'Solana') {
+      chainsToQuery = ['Solana'];
     } else {
-      // EVM 链查询
-      const promises = addresses.map(async (address) => {
-        try {
-          const balance = await getEVMBalance(chain, address);
-          return { address, balance };
-        } catch (error) {
-          return { address, balance: 'Error' };
-        }
-      });
-      const evmResults = await Promise.all(promises);
-      results.push(...evmResults);
+      chainsToQuery = [chain];
     }
 
-    return NextResponse.json(results);
+    const results: BalanceResponse[] = [];
+
+    // 对每个地址查询所有链的余额
+    for (const address of addresses) {
+      const balances: Record<string, string> = {};
+
+      // 并行查询所有链
+      const chainPromises = chainsToQuery.map(async (chainName) => {
+        try {
+          if (chainName === 'Solana') {
+            const balance = await getSolanaBalance(address);
+            return { chain: chainName, balance };
+          } else {
+            const balance = await getEVMBalance(chainName, address);
+            return { chain: chainName, balance };
+          }
+        } catch (error) {
+          return { chain: chainName, balance: 'Error' };
+        }
+      });
+
+      const chainResults = await Promise.all(chainPromises);
+      chainResults.forEach(({ chain, balance }) => {
+        balances[chain] = balance;
+      });
+
+      results.push({ address, balances });
+    }
+
+    return NextResponse.json({ results, chains: chainsToQuery });
   } catch (error) {
     console.error('API Error:', error);
     return NextResponse.json(
