@@ -22,6 +22,7 @@ const CHAINS = ['All EVM Chains', ...EVM_CHAINS, 'Solana'];
 interface BalanceResult {
   address: string;
   balances: Record<string, string>;
+  totalBalance: string; // 所有链的余额总和
 }
 
 interface ApiResponse {
@@ -137,37 +138,24 @@ export default function Home() {
 
       {results.length > 0 && (
         <div className="results-section">
-          <h2>查询结果</h2>
+          <h2>查询结果（所有链余额总和）</h2>
           <div className="results-table">
             <table>
               <thead>
                 <tr>
                   <th className="address-header">地址</th>
-                  {queriedChains.map((chain) => (
-                    <th key={chain} className="chain-header">
-                      {chain} ({getBalanceUnit(chain)})
-                    </th>
-                  ))}
+                  <th className="total-header">总余额</th>
                 </tr>
               </thead>
               <tbody>
                 {results.map((result, index) => (
                   <tr key={index}>
                     <td className="address-cell">{result.address}</td>
-                    {queriedChains.map((chain) => {
-                      const balance = result.balances[chain] || 'N/A';
-                      return (
-                        <td key={chain} className="balance-cell">
-                          {balance === 'Error'
-                            ? '查询失败'
-                            : balance === 'N/A'
-                            ? '-'
-                            : parseFloat(balance).toLocaleString('en-US', {
-                                maximumFractionDigits: 8,
-                              })}
-                        </td>
-                      );
-                    })}
+                    <td className="total-balance-cell">
+                      {parseFloat(result.totalBalance).toLocaleString('en-US', {
+                        maximumFractionDigits: 8,
+                      })}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -297,36 +285,25 @@ export default function Home() {
         }
 
         .address-header {
-          position: sticky;
-          left: 0;
-          background: #f5f5f5;
-          z-index: 1;
+          text-align: left;
         }
 
-        .chain-header {
-          white-space: nowrap;
-          min-width: 120px;
+        .total-header {
+          text-align: right;
+          min-width: 200px;
         }
 
         .address-cell {
           font-family: 'Courier New', monospace;
           font-size: 0.9rem;
           word-break: break-all;
-          position: sticky;
-          left: 0;
-          background: white;
-          z-index: 1;
         }
 
-        tbody tr:hover .address-cell {
-          background: #f9f9f9;
-        }
-
-        .balance-cell {
-          font-weight: 600;
+        .total-balance-cell {
+          font-weight: 700;
           color: #0070f3;
           text-align: right;
-          white-space: nowrap;
+          font-size: 1.1rem;
         }
 
         tbody tr:hover {

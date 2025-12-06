@@ -24,6 +24,9 @@ const SOLANA_RPC = 'https://rpc.ankr.com/solana';
 // 查询超时时间（毫秒）
 const QUERY_TIMEOUT = 5000;
 
+// 最大并发数
+const MAX_CONCURRENT = 50;
+
 interface BalanceRequest {
   chain: string;
   chains?: string[]; // 支持多链查询
@@ -33,6 +36,7 @@ interface BalanceRequest {
 interface BalanceResponse {
   address: string;
   balances: Record<string, string>; // 每个链的余额
+  totalBalance: string; // 所有链的余额总和
 }
 
 // 带超时的 Promise 包装器
@@ -43,6 +47,42 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
       setTimeout(() => reject(new Error('Query timeout')), timeoutMs)
     ),
   ]);
+}
+
+// 并发控制函数（使用更简单的实现）
+async function runWithConcurrencyLimit<T>(
+  tasks: (() => Promise<T>)[],
+  limit: number
+): Promise<T[]> {
+  const results: T[] = [];
+  const executing: Promise<void>[] = [];
+
+  for (let i = 0; i < tasks.length; i++) {
+    const task = tasks[i];
+    const promise = task()
+      .then((result) => {
+        results[i] = result;
+      })
+      .catch((error) => {
+        console.error(`Task ${i} error:`, error);
+        throw error;
+      })
+      .finally(() => {
+        const index = executing.indexOf(promise);
+        if (index > -1) {
+          executing.splice(index, 1);
+        }
+      });
+
+    executing.push(promise);
+
+    if (executing.length >= limit) {
+      await Promise.race(executing);
+    }
+  }
+
+  await Promise.all(executing);
+  return results;
 }
 
 // 查询 EVM 链余额（带超时控制）
@@ -106,25 +146,30 @@ export async function POST(request: NextRequest) {
       chainsToQuery = [chain];
     }
 
-    // 完全并行化：创建所有地址和所有链的查询任务
-    const allQueries = addresses.flatMap((address) =>
-      chainsToQuery.map(async (chainName) => {
-        try {
-          let balance: string;
-          if (chainName === 'Solana') {
-            balance = await getSolanaBalance(address);
-          } else {
-            balance = await getEVMBalance(chainName, address);
+    // 创建所有地址和所有链的查询任务（使用函数包装以便并发控制）
+    const allQueryTasks = addresses.flatMap((address) =>
+      chainsToQuery.map(
+        (chainName) => async () => {
+          try {
+            let balance: string;
+            if (chainName === 'Solana') {
+              balance = await getSolanaBalance(address);
+            } else {
+              balance = await getEVMBalance(chainName, address);
+            }
+            return { address, chain: chainName, balance };
+          } catch (error) {
+            return { address, chain: chainName, balance: 'Error' };
           }
-          return { address, chain: chainName, balance };
-        } catch (error) {
-          return { address, chain: chainName, balance: 'Error' };
         }
-      })
+      )
     );
 
-    // 并行执行所有查询
-    const queryResults = await Promise.all(allQueries);
+    // 使用并发控制执行所有查询
+    const queryResults = await runWithConcurrencyLimit(
+      allQueryTasks,
+      MAX_CONCURRENT
+    );
 
     // 按地址组织结果
     const resultsMap = new Map<string, Record<string, string>>();
@@ -138,11 +183,27 @@ export async function POST(request: NextRequest) {
       resultsMap.set(address, balances);
     });
 
-    // 转换为数组格式，保持地址顺序
-    const results: BalanceResponse[] = addresses.map((address) => ({
-      address,
-      balances: resultsMap.get(address) || {},
-    }));
+    // 转换为数组格式，保持地址顺序，并计算总余额
+    const results: BalanceResponse[] = addresses.map((address) => {
+      const balances = resultsMap.get(address) || {};
+      
+      // 计算所有链的余额总和
+      let totalBalance = 0;
+      Object.values(balances).forEach((balance) => {
+        if (balance !== 'Error' && balance !== 'N/A') {
+          const numBalance = parseFloat(balance);
+          if (!isNaN(numBalance)) {
+            totalBalance += numBalance;
+          }
+        }
+      });
+
+      return {
+        address,
+        balances,
+        totalBalance: totalBalance.toFixed(8),
+      };
+    });
 
     return NextResponse.json({ results, chains: chainsToQuery });
   } catch (error) {
