@@ -25,6 +25,23 @@ const SOLANA_RPC_ENDPOINTS = [
   'https://solana.public-rpc.com',
 ];
 
+// 链名到 CoinGecko 代币 ID 的映射
+const CHAIN_TO_COINGECKO_ID: Record<string, string> = {
+  ETH: 'ethereum',
+  BSC: 'binancecoin',
+  Polygon: 'matic-network',
+  Arbitrum: 'ethereum', // Arbitrum 使用 ETH
+  Optimism: 'ethereum', // Optimism 使用 ETH
+  Base: 'ethereum', // Base 使用 ETH
+  Avalanche: 'avalanche-2',
+  Fantom: 'fantom',
+  zkSync: 'ethereum', // zkSync 使用 ETH
+  Linea: 'ethereum', // Linea 使用 ETH
+  Scroll: 'ethereum', // Scroll 使用 ETH
+  Mantle: 'mantle',
+  Solana: 'solana',
+};
+
 // 查询超时时间（毫秒）
 const QUERY_TIMEOUT = 10000; // 增加到10秒
 
@@ -40,7 +57,8 @@ interface BalanceRequest {
 interface BalanceResponse {
   address: string;
   balances: Record<string, string>; // 每个链的余额
-  totalBalance: string; // 所有链的余额总和
+  totalBalance: string; // 所有链的余额总和（美元）
+  totalBalanceUSD: string; // 美元总价值
 }
 
 // 带超时的 Promise 包装器
@@ -144,6 +162,90 @@ async function getSolanaBalance(address: string): Promise<string> {
   throw new Error('All Solana RPC endpoints failed');
 }
 
+// 获取代币价格（使用 CoinGecko API，免费无需 API KEY）
+async function getTokenPrice(chainName: string): Promise<number> {
+  const coinId = CHAIN_TO_COINGECKO_ID[chainName];
+  if (!coinId) {
+    console.warn(`No price data for chain: ${chainName}`);
+    return 0;
+  }
+
+  try {
+    const response = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`,
+      {
+        headers: {
+          'Accept': 'application/json',
+        },
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`CoinGecko API error: ${response.status}`);
+    }
+
+    const data: any = await response.json();
+    return data[coinId]?.usd || 0;
+  } catch (error) {
+    console.error(`Error fetching price for ${chainName}:`, error);
+    return 0; // 价格获取失败返回0，不影响其他查询
+  }
+}
+
+// 批量获取所有代币价格
+async function getTokenPrices(chains: string[]): Promise<Record<string, number>> {
+  const uniqueCoinIds = new Set<string>();
+  chains.forEach((chain) => {
+    const coinId = CHAIN_TO_COINGECKO_ID[chain];
+    if (coinId) {
+      uniqueCoinIds.add(coinId);
+    }
+  });
+
+  const coinIdsArray = Array.from(uniqueCoinIds);
+  if (coinIdsArray.length === 0) {
+    return {};
+  }
+
+  try {
+    const response = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${coinIdsArray.join(',')}&vs_currencies=usd`,
+      {
+        headers: {
+          'Accept': 'application/json',
+        },
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`CoinGecko API error: ${response.status}`);
+    }
+
+    const data: any = await response.json();
+    const prices: Record<string, number> = {};
+
+    // 将 coinId 映射回链名
+    chains.forEach((chain) => {
+      const coinId = CHAIN_TO_COINGECKO_ID[chain];
+      if (coinId && data[coinId]) {
+        prices[chain] = data[coinId]?.usd || 0;
+      } else {
+        prices[chain] = 0;
+      }
+    });
+
+    return prices;
+  } catch (error) {
+    console.error('Error fetching token prices:', error);
+    // 返回空对象，所有价格设为0
+    const prices: Record<string, number> = {};
+    chains.forEach((chain) => {
+      prices[chain] = 0;
+    });
+    return prices;
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body: BalanceRequest = await request.json();
@@ -209,17 +311,21 @@ export async function POST(request: NextRequest) {
       }
     });
 
-    // 转换为数组格式，保持地址顺序，并计算总余额
+    // 获取所有代币的价格
+    const prices = await getTokenPrices(chainsToQuery);
+
+    // 转换为数组格式，保持地址顺序，并计算总余额（美元）
     const results: BalanceResponse[] = addresses.map((address) => {
       const balances = resultsMap.get(address) || {};
       
-      // 计算所有链的余额总和
-      let totalBalance = 0;
-      Object.values(balances).forEach((balance) => {
+      // 计算所有链的美元总价值
+      let totalBalanceUSD = 0;
+      Object.entries(balances).forEach(([chain, balance]) => {
         if (balance !== 'Error' && balance !== 'N/A') {
           const numBalance = parseFloat(balance);
           if (!isNaN(numBalance)) {
-            totalBalance += numBalance;
+            const price = prices[chain] || 0;
+            totalBalanceUSD += numBalance * price;
           }
         }
       });
@@ -227,11 +333,12 @@ export async function POST(request: NextRequest) {
       return {
         address,
         balances,
-        totalBalance: totalBalance.toFixed(8),
+        totalBalance: totalBalanceUSD.toFixed(2), // 美元总价值
+        totalBalanceUSD: totalBalanceUSD.toFixed(2),
       };
     });
 
-    return NextResponse.json({ results, chains: chainsToQuery });
+    return NextResponse.json({ results, chains: chainsToQuery, prices });
   } catch (error) {
     console.error('API Error:', error);
     return NextResponse.json(

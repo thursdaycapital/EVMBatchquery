@@ -22,12 +22,14 @@ const CHAINS = ['All EVM Chains', ...EVM_CHAINS, 'Solana'];
 interface BalanceResult {
   address: string;
   balances: Record<string, string>;
-  totalBalance: string; // 所有链的余额总和
+  totalBalance: string; // 所有链的余额总和（美元）
+  totalBalanceUSD: string; // 美元总价值
 }
 
 interface ApiResponse {
   results: BalanceResult[];
   chains: string[];
+  prices?: Record<string, number>; // 代币价格
 }
 
 export default function Home() {
@@ -143,12 +145,12 @@ export default function Home() {
             <strong>总余额说明：</strong>
             {selectedChain === 'All EVM Chains' ? (
               <span>
-                包含所有 EVM 链原生代币的总和（ETH + BNB + MATIC + ARB + OP + BASE + AVAX + FTM + zkSync + Linea + Scroll + Mantle）
+                显示所有 EVM 链原生代币的美元总价值（ETH + BNB + MATIC + ARB + OP + BASE + AVAX + FTM + zkSync + Linea + Scroll + Mantle）
               </span>
             ) : selectedChain === 'Solana' ? (
-              <span>包含 Solana 链原生代币（SOL）</span>
+              <span>显示 Solana 链原生代币（SOL）的美元价值</span>
             ) : (
-              <span>包含 {selectedChain} 链原生代币</span>
+              <span>显示 {selectedChain} 链原生代币的美元价值</span>
             )}
           </div>
           <div className="results-table">
@@ -156,7 +158,7 @@ export default function Home() {
               <thead>
                 <tr>
                   <th className="address-header">地址</th>
-                  <th className="total-header">总余额</th>
+                  <th className="total-header">总余额 (USD)</th>
                 </tr>
               </thead>
               <tbody>
@@ -164,8 +166,9 @@ export default function Home() {
                   <tr key={index}>
                     <td className="address-cell">{result.address}</td>
                     <td className="total-balance-cell">
-                      {parseFloat(result.totalBalance).toLocaleString('en-US', {
-                        maximumFractionDigits: 8,
+                      ${parseFloat(result.totalBalance || result.totalBalanceUSD || '0').toLocaleString('en-US', {
+                        minimumFractionDigits: 2,
+                        maximumFractionDigits: 2,
                       })}
                     </td>
                   </tr>
