@@ -138,7 +138,19 @@ export default function Home() {
 
       {results.length > 0 && (
         <div className="results-section">
-          <h2>查询结果（所有链余额总和）</h2>
+          <h2>查询结果</h2>
+          <div className="info-box">
+            <strong>总余额说明：</strong>
+            {selectedChain === 'All EVM Chains' ? (
+              <span>
+                包含所有 EVM 链原生代币的总和（ETH + BNB + MATIC + ARB + OP + BASE + AVAX + FTM + zkSync + Linea + Scroll + Mantle）
+              </span>
+            ) : selectedChain === 'Solana' ? (
+              <span>包含 Solana 链原生代币（SOL）</span>
+            ) : (
+              <span>包含 {selectedChain} 链原生代币</span>
+            )}
+          </div>
           <div className="results-table">
             <table>
               <thead>
@@ -257,6 +269,26 @@ export default function Home() {
         .results-section h2 {
           margin-top: 0;
           color: #333;
+        }
+
+        .info-box {
+          background: #e3f2fd;
+          border-left: 4px solid #2196f3;
+          padding: 1rem;
+          margin-bottom: 1.5rem;
+          border-radius: 4px;
+          font-size: 0.95rem;
+          line-height: 1.6;
+        }
+
+        .info-box strong {
+          color: #1976d2;
+          display: block;
+          margin-bottom: 0.5rem;
+        }
+
+        .info-box span {
+          color: #555;
         }
 
         .results-table {
