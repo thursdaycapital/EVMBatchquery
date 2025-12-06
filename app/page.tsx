@@ -19,10 +19,19 @@ const EVM_CHAINS = [
 
 const CHAINS = ['All EVM Chains', ...EVM_CHAINS, 'Solana'];
 
+interface TokenBalance {
+  tokenAddress: string;
+  tokenSymbol: string;
+  tokenName: string;
+  balance: string;
+  decimals: number;
+  value: string; // 美元价值
+}
+
 interface BalanceResult {
   address: string;
-  balances: Record<string, string>;
-  totalBalance: string; // 所有链的余额总和（美元）
+  tokens: TokenBalance[]; // 所有代币列表
+  totalBalance: string; // 所有代币的美元总价值
   totalBalanceUSD: string; // 美元总价值
 }
 
@@ -145,12 +154,12 @@ export default function Home() {
             <strong>总余额说明：</strong>
             {selectedChain === 'All EVM Chains' ? (
               <span>
-                显示所有 EVM 链原生代币的美元总价值（ETH + BNB + MATIC + ARB + OP + BASE + AVAX + FTM + zkSync + Linea + Scroll + Mantle）
+                显示钱包中所有代币（包括原生代币和 ERC-20 代币）的美元总价值，仅统计在 CoinGecko 上有价格的代币
               </span>
             ) : selectedChain === 'Solana' ? (
-              <span>显示 Solana 链原生代币（SOL）的美元价值</span>
+              <span>显示钱包中所有代币（包括 SOL 和 SPL 代币）的美元总价值，仅统计在 CoinGecko 上有价格的代币</span>
             ) : (
-              <span>显示 {selectedChain} 链原生代币的美元价值</span>
+              <span>显示钱包中所有代币（包括原生代币和 ERC-20 代币）的美元总价值，仅统计在 CoinGecko 上有价格的代币</span>
             )}
           </div>
           <div className="results-table">

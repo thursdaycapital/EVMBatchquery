@@ -18,6 +18,22 @@ const EVM_RPC_ENDPOINTS: Record<string, string[]> = {
   Mantle: ['https://rpc.mantle.xyz', 'https://mantle.blockpi.network/v1/rpc/public'],
 };
 
+// Blockscout API 端点（用于获取所有代币余额）
+const BLOCKSCOUT_APIS: Record<string, string> = {
+  ETH: 'https://eth.blockscout.com/api',
+  BSC: 'https://bsc.blockscout.com/api',
+  Polygon: 'https://polygon.blockscout.com/api',
+  Arbitrum: 'https://arbitrum.blockscout.com/api',
+  Optimism: 'https://optimism.blockscout.com/api',
+  Base: 'https://base.blockscout.com/api',
+  Avalanche: 'https://avalanche.blockscout.com/api',
+  Fantom: 'https://fantom.blockscout.com/api',
+  zkSync: '', // zkSync 没有 Blockscout
+  Linea: 'https://linea.blockscout.com/api',
+  Scroll: 'https://scroll.blockscout.com/api',
+  Mantle: 'https://mantle.blockscout.com/api',
+};
+
 // Solana 公共 RPC 端点（使用多个备用端点）
 const SOLANA_RPC_ENDPOINTS = [
   'https://api.mainnet-beta.solana.com',
@@ -54,10 +70,19 @@ interface BalanceRequest {
   addresses: string[];
 }
 
+interface TokenBalance {
+  tokenAddress: string;
+  tokenSymbol: string;
+  tokenName: string;
+  balance: string;
+  decimals: number;
+  value: string; // 美元价值
+}
+
 interface BalanceResponse {
   address: string;
-  balances: Record<string, string>; // 每个链的余额
-  totalBalance: string; // 所有链的余额总和（美元）
+  tokens: TokenBalance[]; // 所有代币列表
+  totalBalance: string; // 所有代币的美元总价值
   totalBalanceUSD: string; // 美元总价值
 }
 
@@ -112,54 +137,139 @@ async function runWithConcurrencyLimit<T>(
   return results.filter((r): r is T => r !== undefined);
 }
 
-// 查询 EVM 链余额（带超时控制和重试机制）
-async function getEVMBalance(chain: string, address: string): Promise<string> {
+// 查询 EVM 链的所有代币余额（包括原生代币和 ERC-20）
+async function getEVMAllTokens(chain: string, address: string): Promise<TokenBalance[]> {
+  const tokens: TokenBalance[] = [];
+  
+  // 1. 查询原生代币余额
   const rpcUrls = EVM_RPC_ENDPOINTS[chain];
-  if (!rpcUrls || rpcUrls.length === 0) {
-    throw new Error(`Unsupported chain: ${chain}`);
-  }
-
-  // 尝试每个 RPC 端点
-  for (const rpcUrl of rpcUrls) {
-    try {
-      const provider = new ethers.JsonRpcProvider(rpcUrl, undefined, {
-        staticNetwork: true,
-      });
-      const balancePromise = provider.getBalance(address);
-      const balance = await withTimeout(balancePromise, QUERY_TIMEOUT);
-      // 转换为 ETH 单位（18 位小数）
-      return ethers.formatEther(balance);
-    } catch (error) {
-      console.error(`Error fetching balance for ${chain} from ${rpcUrl}:`, error);
-      // 继续尝试下一个端点
-      continue;
+  if (rpcUrls && rpcUrls.length > 0) {
+    for (const rpcUrl of rpcUrls) {
+      try {
+        const provider = new ethers.JsonRpcProvider(rpcUrl, undefined, {
+          staticNetwork: true,
+        });
+        const balancePromise = provider.getBalance(address);
+        const balance = await withTimeout(balancePromise, QUERY_TIMEOUT);
+        const balanceFormatted = ethers.formatEther(balance);
+        
+        if (parseFloat(balanceFormatted) > 0) {
+          tokens.push({
+            tokenAddress: 'native',
+            tokenSymbol: chain === 'ETH' ? 'ETH' : chain,
+            tokenName: chain === 'ETH' ? 'Ethereum' : `${chain} Native Token`,
+            balance: balanceFormatted,
+            decimals: 18,
+            value: '0', // 稍后计算
+          });
+        }
+        break; // 成功获取原生代币余额后退出
+      } catch (error) {
+        console.error(`Error fetching native balance for ${chain}:`, error);
+        continue;
+      }
     }
   }
 
-  // 所有端点都失败
-  throw new Error(`All RPC endpoints failed for ${chain}`);
+  // 2. 查询 ERC-20 代币余额（使用 Blockscout API）
+  const blockscoutApi = BLOCKSCOUT_APIS[chain];
+  if (blockscoutApi) {
+    try {
+      const response = await fetch(
+        `${blockscoutApi}?module=account&action=tokenlist&address=${address}`,
+        {
+          headers: { 'Accept': 'application/json' },
+        }
+      );
+      
+      if (response.ok) {
+        const data: any = await response.json();
+        if (data.status === '1' && data.result && Array.isArray(data.result)) {
+          data.result.forEach((token: any) => {
+            if (token.balance && parseFloat(token.balance) > 0) {
+              const decimals = parseInt(token.token_decimals || '18', 10);
+              const balance = ethers.formatUnits(token.balance, decimals);
+              
+              tokens.push({
+                tokenAddress: token.contract_address || token.token_address,
+                tokenSymbol: token.symbol || 'UNKNOWN',
+                tokenName: token.name || 'Unknown Token',
+                balance: balance,
+                decimals: decimals,
+                value: '0', // 稍后计算
+              });
+            }
+          });
+        }
+      }
+    } catch (error) {
+      console.error(`Error fetching tokens from Blockscout for ${chain}:`, error);
+    }
+  }
+
+  // 3. 对于没有 Blockscout 的链（如 zkSync），使用 RPC 查询（简化版，只查询原生代币）
+  // 注意：完整实现需要查询 Transfer 事件，这里先简化处理
+
+  return tokens;
 }
 
-// 查询 Solana 余额（带超时控制和重试机制）
-async function getSolanaBalance(address: string): Promise<string> {
+// 查询 Solana 的所有代币余额（包括 SOL 和 SPL 代币）
+async function getSolanaAllTokens(address: string): Promise<TokenBalance[]> {
+  const tokens: TokenBalance[] = [];
+  
   // 尝试每个 RPC 端点
   for (const rpcUrl of SOLANA_RPC_ENDPOINTS) {
     try {
       const connection = new Connection(rpcUrl, 'confirmed');
       const publicKey = new PublicKey(address);
+      
+      // 1. 查询 SOL 余额
       const balancePromise = connection.getBalance(publicKey);
       const balance = await withTimeout(balancePromise, QUERY_TIMEOUT);
-      // lamports 转换为 SOL（9 位小数）
-      return (balance / 1e9).toString();
+      const solBalance = (balance / 1e9).toString();
+      
+      if (parseFloat(solBalance) > 0) {
+        tokens.push({
+          tokenAddress: 'native',
+          tokenSymbol: 'SOL',
+          tokenName: 'Solana',
+          balance: solBalance,
+          decimals: 9,
+          value: '0',
+        });
+      }
+      
+      // 2. 查询所有 SPL 代币余额
+      const tokenAccountsPromise = connection.getParsedTokenAccountsByOwner(publicKey, {
+        programId: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+      });
+      const tokenAccounts = await withTimeout(tokenAccountsPromise, QUERY_TIMEOUT);
+      
+      tokenAccounts.value.forEach((accountInfo) => {
+        const parsedInfo = accountInfo.account.data.parsed?.info;
+        if (parsedInfo && parsedInfo.tokenAmount) {
+          const amount = parsedInfo.tokenAmount.uiAmount;
+          if (amount && amount > 0) {
+            tokens.push({
+              tokenAddress: parsedInfo.mint || 'unknown',
+              tokenSymbol: parsedInfo.tokenAmount.symbol || 'UNKNOWN',
+              tokenName: parsedInfo.tokenAmount.symbol || 'Unknown Token',
+              balance: amount.toString(),
+              decimals: parsedInfo.tokenAmount.decimals || 9,
+              value: '0',
+            });
+          }
+        }
+      });
+      
+      break; // 成功获取后退出
     } catch (error) {
-      console.error(`Error fetching Solana balance from ${rpcUrl}:`, error);
-      // 继续尝试下一个端点
+      console.error(`Error fetching Solana tokens from ${rpcUrl}:`, error);
       continue;
     }
   }
 
-  // 所有端点都失败
-  throw new Error('All Solana RPC endpoints failed');
+  return tokens;
 }
 
 // 获取代币价格（使用 CoinGecko API，免费无需 API KEY）
@@ -192,24 +302,45 @@ async function getTokenPrice(chainName: string): Promise<number> {
   }
 }
 
-// 批量获取所有代币价格
-async function getTokenPrices(chains: string[]): Promise<Record<string, number>> {
-  const uniqueCoinIds = new Set<string>();
-  chains.forEach((chain) => {
-    const coinId = CHAIN_TO_COINGECKO_ID[chain];
-    if (coinId) {
-      uniqueCoinIds.add(coinId);
-    }
-  });
+// 根据代币符号或地址获取价格（使用 CoinGecko API）
+async function getTokenPriceBySymbol(symbol: string, tokenAddress?: string): Promise<number> {
+  // 首先尝试通过符号匹配
+  const symbolUpper = symbol.toUpperCase();
+  
+  // 常见代币符号到 CoinGecko ID 的映射
+  const symbolToCoinId: Record<string, string> = {
+    'ETH': 'ethereum',
+    'WETH': 'ethereum',
+    'BNB': 'binancecoin',
+    'WBNB': 'binancecoin',
+    'MATIC': 'matic-network',
+    'WMATIC': 'matic-network',
+    'ARB': 'arbitrum',
+    'OP': 'optimism',
+    'AVAX': 'avalanche-2',
+    'WAVAX': 'avalanche-2',
+    'FTM': 'fantom',
+    'WFTM': 'fantom',
+    'SOL': 'solana',
+    'USDT': 'tether',
+    'USDC': 'usd-coin',
+    'DAI': 'dai',
+    'MNT': 'mantle',
+    'WBTC': 'wrapped-bitcoin',
+    'BTC': 'bitcoin',
+  };
 
-  const coinIdsArray = Array.from(uniqueCoinIds);
-  if (coinIdsArray.length === 0) {
-    return {};
+  let coinId = symbolToCoinId[symbolUpper];
+  
+  // 如果没有找到，尝试使用符号搜索（简化版，实际应该使用搜索 API）
+  if (!coinId) {
+    // 对于未知代币，返回 0（表示没有价格数据）
+    return 0;
   }
 
   try {
     const response = await fetch(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${coinIdsArray.join(',')}&vs_currencies=usd`,
+      `https://api.coingecko.com/api/v3/simple/price?ids=${coinId}&vs_currencies=usd`,
       {
         headers: {
           'Accept': 'application/json',
@@ -218,32 +349,88 @@ async function getTokenPrices(chains: string[]): Promise<Record<string, number>>
     );
 
     if (!response.ok) {
-      throw new Error(`CoinGecko API error: ${response.status}`);
+      return 0;
     }
 
     const data: any = await response.json();
-    const prices: Record<string, number> = {};
-
-    // 将 coinId 映射回链名
-    chains.forEach((chain) => {
-      const coinId = CHAIN_TO_COINGECKO_ID[chain];
-      if (coinId && data[coinId]) {
-        prices[chain] = data[coinId]?.usd || 0;
-      } else {
-        prices[chain] = 0;
-      }
-    });
-
-    return prices;
+    return data[coinId]?.usd || 0;
   } catch (error) {
-    console.error('Error fetching token prices:', error);
-    // 返回空对象，所有价格设为0
-    const prices: Record<string, number> = {};
-    chains.forEach((chain) => {
-      prices[chain] = 0;
-    });
+    console.error(`Error fetching price for ${symbol}:`, error);
+    return 0;
+  }
+}
+
+// 批量获取代币价格（优化版）
+async function getTokenPricesBatch(tokens: TokenBalance[]): Promise<Record<string, number>> {
+  const prices: Record<string, number> = {};
+  const uniqueSymbols = new Set<string>();
+  
+  tokens.forEach((token) => {
+    uniqueSymbols.add(token.tokenSymbol.toUpperCase());
+  });
+
+  // 批量查询价格
+  const symbolToCoinId: Record<string, string> = {
+    'ETH': 'ethereum',
+    'WETH': 'ethereum',
+    'BNB': 'binancecoin',
+    'WBNB': 'binancecoin',
+    'MATIC': 'matic-network',
+    'WMATIC': 'matic-network',
+    'ARB': 'arbitrum',
+    'OP': 'optimism',
+    'AVAX': 'avalanche-2',
+    'WAVAX': 'avalanche-2',
+    'FTM': 'fantom',
+    'WFTM': 'fantom',
+    'SOL': 'solana',
+    'USDT': 'tether',
+    'USDC': 'usd-coin',
+    'DAI': 'dai',
+    'MNT': 'mantle',
+    'WBTC': 'wrapped-bitcoin',
+    'BTC': 'bitcoin',
+  };
+
+  const coinIds = Array.from(uniqueSymbols)
+    .map(symbol => symbolToCoinId[symbol])
+    .filter(id => id !== undefined) as string[];
+
+  if (coinIds.length === 0) {
     return prices;
   }
+
+  try {
+    const response = await fetch(
+      `https://api.coingecko.com/api/v3/simple/price?ids=${coinIds.join(',')}&vs_currencies=usd`,
+      {
+        headers: {
+          'Accept': 'application/json',
+        },
+      }
+    );
+
+    if (response.ok) {
+      const data: any = await response.json();
+      
+      // 创建反向映射
+      const coinIdToSymbol: Record<string, string> = {};
+      Object.entries(symbolToCoinId).forEach(([symbol, coinId]) => {
+        coinIdToSymbol[coinId] = symbol;
+      });
+
+      Object.entries(data).forEach(([coinId, priceData]: [string, any]) => {
+        const symbol = coinIdToSymbol[coinId];
+        if (symbol) {
+          prices[symbol] = priceData.usd || 0;
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error fetching token prices batch:', error);
+  }
+
+  return prices;
 }
 
 export async function POST(request: NextRequest) {
@@ -271,20 +458,21 @@ export async function POST(request: NextRequest) {
       chainsToQuery = [chain];
     }
 
-    // 创建所有地址和所有链的查询任务（使用函数包装以便并发控制）
+    // 创建所有地址和所有链的查询任务（查询所有代币）
     const allQueryTasks = addresses.flatMap((address) =>
       chainsToQuery.map(
         (chainName) => async () => {
           try {
-            let balance: string;
+            let tokens: TokenBalance[] = [];
             if (chainName === 'Solana') {
-              balance = await getSolanaBalance(address);
+              tokens = await getSolanaAllTokens(address);
             } else {
-              balance = await getEVMBalance(chainName, address);
+              tokens = await getEVMAllTokens(chainName, address);
             }
-            return { address, chain: chainName, balance };
+            return { address, chain: chainName, tokens };
           } catch (error) {
-            return { address, chain: chainName, balance: 'Error' };
+            console.error(`Error fetching tokens for ${address} on ${chainName}:`, error);
+            return { address, chain: chainName, tokens: [] };
           }
         }
       )
@@ -296,49 +484,72 @@ export async function POST(request: NextRequest) {
       MAX_CONCURRENT
     );
 
-    // 按地址组织结果
-    const resultsMap = new Map<string, Record<string, string>>();
-    addresses.forEach((address) => {
-      resultsMap.set(address, {});
-    });
-
+    // 收集所有代币
+    const allTokens: TokenBalance[] = [];
     queryResults.forEach((result) => {
-      // 确保结果存在且有效
-      if (result && result.address && result.chain) {
-        const balances = resultsMap.get(result.address) || {};
-        balances[result.chain] = result.balance || 'Error';
-        resultsMap.set(result.address, balances);
+      if (result && result.tokens) {
+        allTokens.push(...result.tokens);
       }
     });
 
-    // 获取所有代币的价格
-    const prices = await getTokenPrices(chainsToQuery);
+    // 批量获取所有代币的价格
+    const prices = await getTokenPricesBatch(allTokens);
+
+    // 计算每个代币的美元价值
+    allTokens.forEach((token) => {
+      const price = prices[token.tokenSymbol.toUpperCase()] || 0;
+      const balanceNum = parseFloat(token.balance);
+      token.value = (balanceNum * price).toFixed(2);
+    });
+
+    // 按地址组织结果
+    const resultsMap = new Map<string, TokenBalance[]>();
+    addresses.forEach((address) => {
+      resultsMap.set(address, []);
+    });
+
+    queryResults.forEach((result) => {
+      if (result && result.address && result.tokens) {
+        const existingTokens = resultsMap.get(result.address) || [];
+        // 为代币添加价格信息
+        result.tokens.forEach((token) => {
+          const price = prices[token.tokenSymbol.toUpperCase()] || 0;
+          const balanceNum = parseFloat(token.balance);
+          token.value = (balanceNum * price).toFixed(2);
+        });
+        existingTokens.push(...result.tokens);
+        resultsMap.set(result.address, existingTokens);
+      }
+    });
 
     // 转换为数组格式，保持地址顺序，并计算总余额（美元）
     const results: BalanceResponse[] = addresses.map((address) => {
-      const balances = resultsMap.get(address) || {};
+      const tokens = resultsMap.get(address) || [];
       
-      // 计算所有链的美元总价值
+      // 只保留在 CoinGecko 上有价格的代币
+      const tokensWithPrice = tokens.filter(token => {
+        const price = prices[token.tokenSymbol.toUpperCase()] || 0;
+        return price > 0;
+      });
+      
+      // 计算所有代币的美元总价值
       let totalBalanceUSD = 0;
-      Object.entries(balances).forEach(([chain, balance]) => {
-        if (balance !== 'Error' && balance !== 'N/A') {
-          const numBalance = parseFloat(balance);
-          if (!isNaN(numBalance)) {
-            const price = prices[chain] || 0;
-            totalBalanceUSD += numBalance * price;
-          }
+      tokensWithPrice.forEach((token) => {
+        const value = parseFloat(token.value || '0');
+        if (!isNaN(value)) {
+          totalBalanceUSD += value;
         }
       });
 
       return {
         address,
-        balances,
+        tokens: tokensWithPrice,
         totalBalance: totalBalanceUSD.toFixed(2), // 美元总价值
         totalBalanceUSD: totalBalanceUSD.toFixed(2),
       };
     });
 
-    return NextResponse.json({ results, chains: chainsToQuery, prices });
+    return NextResponse.json({ results, chains: chainsToQuery });
   } catch (error) {
     console.error('API Error:', error);
     return NextResponse.json(
